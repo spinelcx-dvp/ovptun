@@ -1,100 +1,138 @@
 #!/bin/bash
 set -e
 
-echo "▶ Installing dependencies..."
-sudo apt-get update -qq
-sudo apt-get install -y -qq openvpn openssl curl wget
+echo "▶ Cleaning up previous build directory..."
+sudo rm -rf /tmp/openvpn-build 2>/dev/null || true
+sudo rm -rf /tmp/chisel* 2>/dev/null || true
+sudo rm -rf /tmp/cloudflared* 2>/dev/null || true
 
-WORK=/tmp/openvpn-build
-rm -rf "$WORK"
-mkdir -p "$WORK"
-cd "$WORK"
+echo "═══════════════════════════════════════"
+echo "▶ Step 1: Downloading chisel..."
+echo "═══════════════════════════════════════"
 
-echo "▶ Generating CA..."
-openssl genrsa -out ca.key 2048 2>/dev/null
-openssl req -new -x509 -days 3650 -key ca.key -out ca.crt \
-  -subj "/C=US/ST=CA/L=LA/O=OpenVPN/CN=OpenVPN-CA" 2>/dev/null
+CHISEL_URL="https://github.com/jpillora/chisel/releases/download/v1.9.1/chisel_1.9.1_linux_amd64.gz"
 
-echo "▶ Generating server cert..."
-openssl genrsa -out server.key 2048 2>/dev/null
-openssl req -new -key server.key -out server.csr \
-  -subj "/C=US/ST=CA/L=LA/O=OpenVPN/CN=server" 2>/dev/null
-openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -out server.crt -days 3650 2>/dev/null
-
-echo "▶ Generating client cert..."
-openssl genrsa -out client1.key 2048 2>/dev/null
-openssl req -new -key client1.key -out client1.csr \
-  -subj "/C=US/ST=CA/L=LA/O=OpenVPN/CN=client1" 2>/dev/null
-openssl x509 -req -in client1.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -out client1.crt -days 3650 2>/dev/null
-
-echo "▶ Generating ta.key..."
-openvpn --genkey secret ta.key
-
-echo "▶ Copying files to /etc/openvpn..."
-sudo mkdir -p /etc/openvpn/server
-sudo mkdir -p /etc/openvpn/client
-sudo cp ca.crt server.crt server.key ta.key /etc/openvpn/server/
-sudo cp ca.crt client1.crt client1.key ta.key /etc/openvpn/client/
-
-echo "▶ Writing server.conf..."
-sudo tee /etc/openvpn/server/server.conf > /dev/null <<'EOF'
-port 443
-proto tcp-server
-dev tun
-ca ca.crt
-cert server.crt
-key server.key
-dh none
-tls-auth ta.key 0
-server 10.8.0.0 255.255.255.0
-ifconfig-pool-persist ipp.txt
-push "redirect-gateway def1 bypass-dhcp"
-push "dhcp-option DNS 1.1.1.1"
-push "dhcp-option DNS 8.8.8.8"
-keepalive 10 120
-cipher AES-256-CBC
-auth SHA256
-user nobody
-group nogroup
-persist-key
-persist-tun
-status openvpn-status.log
-verb 3
-EOF
-
-echo "▶ Enabling IP forwarding..."
-sudo sysctl -w net.ipv4.ip_forward=1 > /dev/null
-
-echo "▶ Setting up NAT..."
-OUT_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-echo "   Outgoing interface: $OUT_IFACE"
-sudo iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$OUT_IFACE" -j MASQUERADE
-
-echo "▶ Starting OpenVPN server..."
-sudo openvpn --config /etc/openvpn/server/server.conf --daemon --log /tmp/openvpn-server.log || true
-
-echo "▶ Waiting for OpenVPN to come up..."
-OPENVPN_UP=0
-for i in {1..15}; do
-  sleep 2
-  if pgrep -f "openvpn" > /dev/null; then
-    OPENVPN_UP=1
+download_ok=0
+for attempt in 1 2 3; do
+  echo "  Attempt $attempt..."
+  if wget --timeout=30 --tries=2 -q "$CHISEL_URL" -O /tmp/chisel.gz; then
+    download_ok=1
     break
   fi
-  echo "  attempt $i: not up yet..."
+  sleep 3
 done
 
-echo "--- OpenVPN processes ---"
-pgrep -a openvpn || echo "(none)"
-echo "--- Last 20 lines of OpenVPN log ---"
-sudo tail -20 /tmp/openvpn-server.log 2>/dev/null || echo "(no log)"
-
-if [ "$OPENVPN_UP" -eq 1 ]; then
-  echo "✅ OpenVPN is running on port 443 (TCP)"
-  exit 0
-else
-  echo "❌ OpenVPN failed to start"
+if [ "$download_ok" -ne 1 ]; then
+  echo "❌ Failed to download chisel"
   exit 1
 fi
+
+echo "  Downloaded: $(ls -la /tmp/chisel.gz)"
+
+echo "▶ Extracting chisel..."
+gunzip -f /tmp/chisel.gz
+mv /tmp/chisel /tmp/chisel-bin
+chmod +x /tmp/chisel-bin
+
+if ! file /tmp/chisel-bin | grep -q "ELF 64-bit"; then
+  echo "❌ chisel is not a valid ELF binary"
+  file /tmp/chisel-bin
+  exit 1
+fi
+
+echo "  chisel version: $(/tmp/chisel-bin --version 2>&1 | head -1)"
+
+echo ""
+echo "═══════════════════════════════════════"
+echo "▶ Step 2: Starting chisel server on 8080"
+echo "═══════════════════════════════════════"
+
+nohup /tmp/chisel-bin server \
+  --port 8080 \
+  --backend http://localhost:443 \
+  --keepalive 25s \
+  > /tmp/chisel.log 2>&1 &
+
+sleep 4
+
+if ! pgrep -f "chisel-bin server" > /dev/null; then
+  echo "❌ Chisel server failed to start"
+  echo "--- chisel.log ---"
+  cat /tmp/chisel.log
+  exit 1
+fi
+
+echo "✅ Chisel server running"
+echo "--- chisel.log (first 10 lines) ---"
+head -10 /tmp/chisel.log || true
+
+echo ""
+echo "═══════════════════════════════════════"
+echo "▶ Step 3: Downloading cloudflared"
+echo "═══════════════════════════════════════"
+
+CF_VERSION="2024.10.0"
+CF_URL="https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-linux-amd64"
+
+download_ok=0
+for attempt in 1 2 3; do
+  echo "  Attempt $attempt..."
+  if wget --timeout=30 --tries=2 -q "$CF_URL" -O /tmp/cloudflared; then
+    download_ok=1
+    break
+  fi
+  if curl -fsSL --max-time 60 "$CF_URL" -o /tmp/cloudflared; then
+    download_ok=1
+    break
+  fi
+  sleep 3
+done
+
+if [ "$download_ok" -ne 1 ]; then
+  echo "❌ Failed to download cloudflared"
+  exit 1
+fi
+
+if ! file /tmp/cloudflared | grep -q "ELF 64-bit"; then
+  echo "❌ cloudflared is not a valid ELF binary"
+  file /tmp/cloudflared
+  exit 1
+fi
+
+chmod +x /tmp/cloudflared
+
+echo ""
+echo "═══════════════════════════════════════"
+echo "▶ Step 4: Starting cloudflared tunnel"
+echo "═══════════════════════════════════════"
+
+nohup /tmp/cloudflared tunnel --url http://localhost:8080 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+
+TUNNEL_HOST=""
+for i in {1..45}; do
+  if grep -q "trycloudflare.com" /tmp/cloudflared.log 2>/dev/null; then
+    TUNNEL_HOST=$(grep -o '[a-zA-Z0-9.-]*\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
+    break
+  fi
+  if ! pgrep -f "cloudflared tunnel" > /dev/null; then
+    echo "❌ Cloudflared process died"
+    echo "--- cloudflared.log ---"
+    cat /tmp/cloudflared.log
+    exit 1
+  fi
+  sleep 2
+done
+
+if [ -z "$TUNNEL_HOST" ]; then
+  echo "❌ Failed to get tunnel URL after 90s"
+  echo "--- cloudflared.log ---"
+  cat /tmp/cloudflared.log
+  exit 1
+fi
+
+echo "$TUNNEL_HOST" > /tmp/tunnel_host.txt
+echo ""
+echo "═══════════════════════════════════════"
+echo "✅ ALL DONE"
+echo "   Tunnel host: $TUNNEL_HOST"
+echo "═══════════════════════════════════════"
