@@ -1,4 +1,4 @@
-name: OpenVPN + TryCloudflare + Panel
+name: OpenVPN WS + TryCloudflare + Panel
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
           echo "=== Workflow files ==="
           ls -la .github/workflows/ || true
 
-      - name: Setup OpenVPN (TCP)
+      - name: Setup OpenVPN (TCP on port 443)
         run: |
           chmod +x setup-openvpn.sh
           sudo -E bash setup-openvpn.sh
@@ -33,11 +33,25 @@ jobs:
           echo "=== Port 443 status ==="
           sudo ss -tlnp | grep 443 || true
 
-      - name: Start OpenVPN tunnel via TryCloudflare
+      - name: Start Chisel + Cloudflare tunnel
         run: |
           chmod +x start-tunnel.sh
           bash start-tunnel.sh
-          echo "✅ OpenVPN host: $(cat /tmp/tunnel_host.txt)"
+          echo "✅ Tunnel host: $(cat /tmp/tunnel_host.txt)"
+
+      - name: Verify chisel and tunnel
+        run: |
+          echo "=== Chisel process ==="
+          pgrep -a chisel-bin || (echo "❌ Chisel not running" && exit 1)
+          echo ""
+          echo "=== Cloudflared process ==="
+          pgrep -a cloudflared || (echo "❌ Cloudflared not running" && exit 1)
+          echo ""
+          echo "=== Port 8080 status ==="
+          sudo ss -tlnp | grep 8080 || true
+          echo ""
+          echo "=== Tunnel host ==="
+          cat /tmp/tunnel_host.txt
 
       - name: Start Web Panel
         run: |
@@ -51,9 +65,25 @@ jobs:
           fi
           echo "✅ Panel is up"
 
-      - name: Expose Panel via TryCloudflare
+      - name: Expose Panel via second TryCloudflare tunnel
         run: |
-          nohup /tmp/cloudflared tunnel --url http://localhost:8080 --no-autoupdate > /tmp/panel_tunnel.log 2>&1 &
+          # تونل دوم برای پنل، روی یک پورت دیگر
+          # اول پنل را روی پورت 9090 راه‌اندازی می‌کنیم که با chisel تداخل نداشته باشد
+          # (در این نسخه پنل روی 8080 است ولی chisel هم روی 8080 است، پس باید تفکیک شود)
+          # برای سادگی، پنل را دوباره روی پورت 9090 بالا می‌آوریم
+          pkill -f "python3 panel.py" || true
+          sleep 1
+          sed -i 's/^PORT = 8080/PORT = 9090/' panel.py
+          nohup python3 panel.py > /tmp/panel.log 2>&1 &
+          sleep 3
+          if ! curl -s -o /dev/null http://localhost:9090/; then
+            echo "❌ Panel failed to start on 9090"
+            cat /tmp/panel.log
+            exit 1
+          fi
+          echo "✅ Panel is up on 9090"
+
+          nohup /tmp/cloudflared tunnel --url http://localhost:9090 --no-autoupdate > /tmp/panel_tunnel.log 2>&1 &
 
           PANEL_URL=""
           for i in {1..45}; do
@@ -78,33 +108,41 @@ jobs:
           VPN_HOST=$(cat /tmp/tunnel_host.txt)
 
           {
-            echo "## ✅ OpenVPN آماده است"
+            echo "## ✅ OpenVPN WS آماده است"
             echo ""
             echo "### 🔗 لینک پنل دانلود کانفیگ:"
             echo ""
             echo "**$PANEL_URL**"
             echo ""
-            echo "### 📡 آدرس سرور OpenVPN:"
+            echo "### 📡 آدرس تونل OpenVPN (WebSocket):"
             echo ""
-            echo "\`$VPN_HOST:443\` (TCP)"
+            echo "\`$VPN_HOST:443\` (WSS/WebSocket)"
             echo ""
             echo "---"
             echo ""
-            echo "**مراحل استفاده:**"
-            echo "1. روی لینک پنل بالا کلیک کن"
-            echo "2. فایل \`.ovpn\` رو دانلود کن"
-            echo "3. توی OpenVPN Connect import کن و وصل شو"
+            echo "### 📋 مراحل استفاده در کلاینت:"
+            echo ""
+            echo "**مرحله ۱: اجرای chisel client روی دستگاه خودت**"
+            echo ""
+            echo "\`\`\`bash"
+            echo "chisel client https://$VPN_HOST 65479:127.0.0.1:443"
+            echo "\`\`\`"
+            echo ""
+            echo "**مرحله ۲: اتصال OpenVPN به پورت محلی 65479**"
+            echo ""
+            echo "فایل \`.ovpn\` را از پنل دانلود کن و در OpenVPN Connect import کن."
             echo ""
             echo "> ⚠️ این آدرس‌ها موقت هستن و بعد از اتمام Workflow از کار می‌افتن."
           } >> $GITHUB_STEP_SUMMARY
 
           echo ""
           echo "═══════════════════════════════════════════"
-          echo "🔗 PANEL URL: $PANEL_URL"
-          echo "📡 VPN HOST : $VPN_HOST:443"
+          echo "🔗 PANEL URL : $PANEL_URL"
+          echo "📡 VPN TUNNEL: $VPN_HOST:443"
           echo "═══════════════════════════════════════════"
 
       - name: Keep Alive (max ~5.5 hours)
         run: |
           echo "سرور در حال اجراست..."
+          echo "برای توقف، Workflow را Cancel کن."
           sleep 20000
