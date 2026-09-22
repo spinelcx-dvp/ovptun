@@ -1,4 +1,4 @@
-name: OpenVPN WS + TryCloudflare + Panel
+name: OpenVPN WS + localhost.run + Panel
 
 on:
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
           echo "=== Port 443 status ==="
           sudo ss -tlnp | grep 443 || true
 
-      - name: Start Chisel + Cloudflare tunnel
+      - name: Start Chisel + localhost.run tunnel
         run: |
           chmod +x start-tunnel.sh
           bash start-tunnel.sh
@@ -44,8 +44,8 @@ jobs:
           echo "=== Chisel process ==="
           pgrep -a chisel-bin || (echo "❌ Chisel not running" && exit 1)
           echo ""
-          echo "=== Cloudflared process ==="
-          pgrep -a cloudflared || (echo "❌ Cloudflared not running" && exit 1)
+          echo "=== SSH tunnel process ==="
+          pgrep -af "ssh.*localhost.run" || (echo "❌ SSH tunnel not running" && exit 1)
           echo ""
           echo "=== Port 8080 status ==="
           sudo ss -tlnp | grep 8080 || true
@@ -53,48 +53,41 @@ jobs:
           echo "=== Tunnel host ==="
           cat /tmp/tunnel_host.txt
 
-      - name: Start Web Panel
+      - name: Start Web Panel on 9090
         run: |
-          nohup python3 panel.py > /tmp/panel.log 2>&1 &
-          sleep 3
-          if ! curl -s -o /dev/null http://localhost:8080/; then
-            echo "❌ Panel failed to start"
-            echo "--- panel.log ---"
-            cat /tmp/panel.log
-            exit 1
-          fi
-          echo "✅ Panel is up"
-
-      - name: Expose Panel via second TryCloudflare tunnel
-        run: |
-          # تونل دوم برای پنل، روی یک پورت دیگر
-          # اول پنل را روی پورت 9090 راه‌اندازی می‌کنیم که با chisel تداخل نداشته باشد
-          # (در این نسخه پنل روی 8080 است ولی chisel هم روی 8080 است، پس باید تفکیک شود)
-          # برای سادگی، پنل را دوباره روی پورت 9090 بالا می‌آوریم
-          pkill -f "python3 panel.py" || true
-          sleep 1
           sed -i 's/^PORT = 8080/PORT = 9090/' panel.py
           nohup python3 panel.py > /tmp/panel.log 2>&1 &
           sleep 3
           if ! curl -s -o /dev/null http://localhost:9090/; then
-            echo "❌ Panel failed to start on 9090"
+            echo "❌ Panel failed to start"
             cat /tmp/panel.log
             exit 1
           fi
           echo "✅ Panel is up on 9090"
 
-          nohup /tmp/cloudflared tunnel --url http://localhost:9090 --no-autoupdate > /tmp/panel_tunnel.log 2>&1 &
+      - name: Expose Panel via localhost.run
+        run: |
+          nohup ssh -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=3 \
+            -o ExitOnForwardFailure=yes \
+            -R 80:localhost:9090 \
+            nokey@localhost.run \
+            > /tmp/panel_tunnel.log 2>&1 &
 
           PANEL_URL=""
           for i in {1..45}; do
-            if grep -q "trycloudflare.com" /tmp/panel_tunnel.log 2>/dev/null; then
-              PANEL_URL=$(grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' /tmp/panel_tunnel.log | head -1)
+            if grep -qE "https://[a-zA-Z0-9.-]+\.lhr\.life" /tmp/panel_tunnel.log 2>/dev/null; then
+              PANEL_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.lhr\.life' /tmp/panel_tunnel.log | head -1)
               break
             fi
-            if ! pgrep -f "cloudflared tunnel" > /dev/null; then
-              echo "❌ Panel tunnel process died"
-              cat /tmp/panel_tunnel.log
-              exit 1
+            if ! pgrep -f "ssh.*localhost.run.*9090" > /dev/null; then
+              # چک می‌کنیم که پروسه ssh کلاً نمرده باشه
+              if ! pgrep -f "ssh.*localhost.run" > /dev/null; then
+                echo "❌ Panel tunnel process died"
+                cat /tmp/panel_tunnel.log
+                exit 1
+              fi
             fi
             sleep 2
           done
@@ -114,9 +107,9 @@ jobs:
             echo ""
             echo "**$PANEL_URL**"
             echo ""
-            echo "### 📡 آدرس تونل OpenVPN (WebSocket):"
+            echo "### 📡 آدرس تونل OpenVPN:"
             echo ""
-            echo "\`$VPN_HOST:443\` (WSS/WebSocket)"
+            echo "\`$VPN_HOST\`"
             echo ""
             echo "---"
             echo ""
@@ -138,7 +131,7 @@ jobs:
           echo ""
           echo "═══════════════════════════════════════════"
           echo "🔗 PANEL URL : $PANEL_URL"
-          echo "📡 VPN TUNNEL: $VPN_HOST:443"
+          echo "📡 VPN TUNNEL: $VPN_HOST"
           echo "═══════════════════════════════════════════"
 
       - name: Keep Alive (max ~5.5 hours)
