@@ -27,16 +27,12 @@ if [ "$download_ok" -ne 1 ]; then
   exit 1
 fi
 
-echo "  Downloaded: $(ls -la /tmp/chisel.gz)"
-
-echo "▶ Extracting chisel..."
 gunzip -f /tmp/chisel.gz
 mv /tmp/chisel /tmp/chisel-bin
 chmod +x /tmp/chisel-bin
 
 if ! file /tmp/chisel-bin | grep -q "ELF 64-bit"; then
   echo "❌ chisel is not a valid ELF binary"
-  file /tmp/chisel-bin
   exit 1
 fi
 
@@ -57,14 +53,11 @@ sleep 4
 
 if ! pgrep -f "chisel-bin server" > /dev/null; then
   echo "❌ Chisel server failed to start"
-  echo "--- chisel.log ---"
   cat /tmp/chisel.log
   exit 1
 fi
 
 echo "✅ Chisel server running"
-echo "--- chisel.log (first 10 lines) ---"
-head -10 /tmp/chisel.log || true
 
 echo ""
 echo "═══════════════════════════════════════"
@@ -95,7 +88,6 @@ fi
 
 if ! file /tmp/cloudflared | grep -q "ELF 64-bit"; then
   echo "❌ cloudflared is not a valid ELF binary"
-  file /tmp/cloudflared
   exit 1
 fi
 
@@ -103,13 +95,13 @@ chmod +x /tmp/cloudflared
 
 echo ""
 echo "═══════════════════════════════════════"
-echo "▶ Step 4: Starting cloudflared tunnel"
+echo "▶ Step 4: Starting cloudflared tunnel (http2 protocol)"
 echo "═══════════════════════════════════════"
 
-nohup /tmp/cloudflared tunnel --url http://localhost:8080 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+nohup /tmp/cloudflared tunnel --url http://localhost:8080 --protocol http2 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
 
 TUNNEL_HOST=""
-for i in {1..45}; do
+for i in {1..90}; do
   if grep -q "trycloudflare.com" /tmp/cloudflared.log 2>/dev/null; then
     TUNNEL_HOST=$(grep -o '[a-zA-Z0-9.-]*\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
     break
@@ -120,11 +112,15 @@ for i in {1..45}; do
     cat /tmp/cloudflared.log
     exit 1
   fi
+  if [ $((i % 15)) -eq 0 ]; then
+    echo "  waited $((i*2))s... last log line:"
+    tail -1 /tmp/cloudflared.log
+  fi
   sleep 2
 done
 
 if [ -z "$TUNNEL_HOST" ]; then
-  echo "❌ Failed to get tunnel URL after 90s"
+  echo "❌ Failed to get tunnel URL after 180s"
   echo "--- cloudflared.log ---"
   cat /tmp/cloudflared.log
   exit 1
