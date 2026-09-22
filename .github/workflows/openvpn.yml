@@ -12,16 +12,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Show files (debug)
+        run: |
+          echo "=== Repository files ==="
+          ls -la
+          echo ""
+          echo "=== Workflow files ==="
+          ls -la .github/workflows/ || true
+
       - name: Setup OpenVPN (TCP)
         run: |
           chmod +x setup-openvpn.sh
           sudo -E bash setup-openvpn.sh
 
+      - name: Verify OpenVPN is running
+        run: |
+          echo "=== OpenVPN processes ==="
+          pgrep -a openvpn || (echo "❌ OpenVPN not running" && exit 1)
+          echo ""
+          echo "=== Port 443 status ==="
+          sudo ss -tlnp | grep 443 || true
+
       - name: Start OpenVPN tunnel via TryCloudflare
         run: |
           chmod +x start-tunnel.sh
           bash start-tunnel.sh
-          echo "OpenVPN host: $(cat /tmp/tunnel_host.txt)"
+          echo "✅ OpenVPN host: $(cat /tmp/tunnel_host.txt)"
 
       - name: Start Web Panel
         run: |
@@ -29,6 +45,7 @@ jobs:
           sleep 3
           if ! curl -s -o /dev/null http://localhost:8080/; then
             echo "❌ Panel failed to start"
+            echo "--- panel.log ---"
             cat /tmp/panel.log
             exit 1
           fi
@@ -37,13 +54,20 @@ jobs:
       - name: Expose Panel via TryCloudflare
         run: |
           nohup /tmp/cloudflared tunnel --url http://localhost:8080 --no-autoupdate > /tmp/panel_tunnel.log 2>&1 &
-          for i in {1..40}; do
+
+          PANEL_URL=""
+          for i in {1..45}; do
             if grep -q "trycloudflare.com" /tmp/panel_tunnel.log 2>/dev/null; then
+              PANEL_URL=$(grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' /tmp/panel_tunnel.log | head -1)
               break
+            fi
+            if ! pgrep -f "cloudflared tunnel" > /dev/null; then
+              echo "❌ Panel tunnel process died"
+              cat /tmp/panel_tunnel.log
+              exit 1
             fi
             sleep 2
           done
-          PANEL_URL=$(grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' /tmp/panel_tunnel.log | head -1)
 
           if [ -z "$PANEL_URL" ]; then
             echo "❌ Panel tunnel failed"
@@ -73,6 +97,12 @@ jobs:
             echo ""
             echo "> ⚠️ این آدرس‌ها موقت هستن و بعد از اتمام Workflow از کار می‌افتن."
           } >> $GITHUB_STEP_SUMMARY
+
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "🔗 PANEL URL: $PANEL_URL"
+          echo "📡 VPN HOST : $VPN_HOST:443"
+          echo "═══════════════════════════════════════════"
 
       - name: Keep Alive (max ~5.5 hours)
         run: |
