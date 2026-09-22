@@ -1,0 +1,80 @@
+name: OpenVPN + TryCloudflare + Panel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup OpenVPN (TCP)
+        run: |
+          chmod +x setup-openvpn.sh
+          sudo -E bash setup-openvpn.sh
+
+      - name: Start OpenVPN tunnel via TryCloudflare
+        run: |
+          chmod +x start-tunnel.sh
+          bash start-tunnel.sh
+          echo "OpenVPN host: $(cat /tmp/tunnel_host.txt)"
+
+      - name: Start Web Panel
+        run: |
+          nohup python3 panel.py > /tmp/panel.log 2>&1 &
+          sleep 3
+          if ! curl -s -o /dev/null http://localhost:8080/; then
+            echo "❌ Panel failed to start"
+            cat /tmp/panel.log
+            exit 1
+          fi
+          echo "✅ Panel is up"
+
+      - name: Expose Panel via TryCloudflare
+        run: |
+          nohup /tmp/cloudflared tunnel --url http://localhost:8080 --no-autoupdate > /tmp/panel_tunnel.log 2>&1 &
+          for i in {1..40}; do
+            if grep -q "trycloudflare.com" /tmp/panel_tunnel.log 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          PANEL_URL=$(grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' /tmp/panel_tunnel.log | head -1)
+
+          if [ -z "$PANEL_URL" ]; then
+            echo "❌ Panel tunnel failed"
+            cat /tmp/panel_tunnel.log
+            exit 1
+          fi
+
+          VPN_HOST=$(cat /tmp/tunnel_host.txt)
+
+          {
+            echo "## ✅ OpenVPN آماده است"
+            echo ""
+            echo "### 🔗 لینک پنل دانلود کانفیگ:"
+            echo ""
+            echo "**$PANEL_URL**"
+            echo ""
+            echo "### 📡 آدرس سرور OpenVPN:"
+            echo ""
+            echo "\`$VPN_HOST:443\` (TCP)"
+            echo ""
+            echo "---"
+            echo ""
+            echo "**مراحل استفاده:**"
+            echo "1. روی لینک پنل بالا کلیک کن"
+            echo "2. فایل \`.ovpn\` رو دانلود کن"
+            echo "3. توی OpenVPN Connect import کن و وصل شو"
+            echo ""
+            echo "> ⚠️ این آدرس‌ها موقت هستن و بعد از اتمام Workflow از کار می‌افتن."
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Keep Alive (max ~5.5 hours)
+        run: |
+          echo "سرور در حال اجراست..."
+          sleep 20000
