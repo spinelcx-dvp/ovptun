@@ -38,11 +38,11 @@ sudo mkdir -p /etc/openvpn/client
 sudo cp ca.crt server.crt server.key ta.key /etc/openvpn/server/
 sudo cp ca.crt client1.crt client1.key ta.key /etc/openvpn/client/
 
-# 🔑 دسترسی خواندن برای کاربر runner
-sudo chmod 644 /etc/openvpn/client/ca.crt
-sudo chmod 644 /etc/openvpn/client/client1.crt
-sudo chmod 644 /etc/openvpn/client/client1.key
-sudo chmod 644 /etc/openvpn/client/ta.key
+# 🔑 دادن دسترسی خواندن به کاربر runner تا پنل بتونه فایل‌ها رو بخونه
+sudo chmod 755 /etc/openvpn/client
+sudo chmod 644 /etc/openvpn/client/*
+sudo chmod 755 /etc/openvpn/server
+sudo chmod 644 /etc/openvpn/server/*
 
 echo "▶ Writing server.conf..."
 sudo tee /etc/openvpn/server/server.conf > /dev/null <<'EOF'
