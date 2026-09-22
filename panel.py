@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import http.server
 import socketserver
@@ -21,10 +20,12 @@ def build_ovpn():
     with open("/etc/openvpn/client/ta.key") as f:
         ta = f.read()
 
+    # کلاینت به پورت محلی chisel (65479) وصل می‌شود
+    # chisel client محلی، ترافیک را به WebSocket تبدیل و به سرور می‌فرستد
     config = f"""client
 dev tun
 proto tcp-client
-remote {host} 443
+remote 127.0.0.1 65479
 resolv-retry infinite
 nobind
 persist-key
@@ -94,9 +95,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 <div class="card">
   <h1>✅ OpenVPN Ready</h1>
   <p>سرور فعال است</p>
-  <div class="host">{host}:443 (TCP)</div>
+  <div class="host">{host}:443 (WebSocket)</div>
   <a class="btn" href="/download">⬇️ دانلود کانفیگ .ovpn</a>
-  <p class="info">پروتکل: TCP | رمزنگاری: AES-256-CBC</p>
+  <p class="info">پروتکل: TCP over WebSocket | رمزنگاری: AES-256-CBC</p>
   <p class="warn">⚠️ این آدرس موقت است و پس از پایان اجرا از کار می‌افتد</p>
   {err_block}
 </div>
