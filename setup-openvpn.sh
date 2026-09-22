@@ -56,8 +56,6 @@ push "dhcp-option DNS 8.8.8.8"
 keepalive 10 120
 cipher AES-256-CBC
 auth SHA256
-compress lz4-v2
-push "compress lz4-v2"
 user nobody
 group nogroup
 persist-key
@@ -75,13 +73,28 @@ echo "   Outgoing interface: $OUT_IFACE"
 sudo iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$OUT_IFACE" -j MASQUERADE
 
 echo "▶ Starting OpenVPN server..."
-sudo openvpn --config /etc/openvpn/server/server.conf --daemon --log /tmp/openvpn-server.log
-sleep 5
+sudo openvpn --config /etc/openvpn/server/server.conf --daemon --log /tmp/openvpn-server.log || true
 
-if pgrep -x openvpn > /dev/null; then
+echo "▶ Waiting for OpenVPN to come up..."
+OPENVPN_UP=0
+for i in {1..15}; do
+  sleep 2
+  if pgrep -f "openvpn" > /dev/null; then
+    OPENVPN_UP=1
+    break
+  fi
+  echo "  attempt $i: not up yet..."
+done
+
+echo "--- OpenVPN processes ---"
+pgrep -a openvpn || echo "(none)"
+echo "--- Last 20 lines of OpenVPN log ---"
+sudo tail -20 /tmp/openvpn-server.log 2>/dev/null || echo "(no log)"
+
+if [ "$OPENVPN_UP" -eq 1 ]; then
   echo "✅ OpenVPN is running on port 443 (TCP)"
+  exit 0
 else
   echo "❌ OpenVPN failed to start"
-  sudo cat /tmp/openvpn-server.log || true
   exit 1
 fi
