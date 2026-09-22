@@ -3,34 +3,40 @@ set -e
 
 echo "▶ Installing dependencies..."
 sudo apt-get update -qq
-sudo apt-get install -y -qq openvpn easy-rsa openssl curl wget
+sudo apt-get install -y -qq openvpn openssl curl wget
 
-echo "▶ Setting up directories..."
+WORK=/tmp/openvpn-build
+rm -rf "$WORK"
+mkdir -p "$WORK"
+cd "$WORK"
+
+echo "▶ Generating CA..."
+openssl genrsa -out ca.key 2048 2>/dev/null
+openssl req -new -x509 -days 3650 -key ca.key -out ca.crt \
+  -subj "/C=US/ST=CA/L=LA/O=OpenVPN/CN=OpenVPN-CA" 2>/dev/null
+
+echo "▶ Generating server cert..."
+openssl genrsa -out server.key 2048 2>/dev/null
+openssl req -new -key server.key -out server.csr \
+  -subj "/C=US/ST=CA/L=LA/O=OpenVPN/CN=server" 2>/dev/null
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out server.crt -days 3650 2>/dev/null
+
+echo "▶ Generating client cert..."
+openssl genrsa -out client1.key 2048 2>/dev/null
+openssl req -new -key client1.key -out client1.csr \
+  -subj "/C=US/ST=CA/L=LA/O=OpenVPN/CN=client1" 2>/dev/null
+openssl x509 -req -in client1.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out client1.crt -days 3650 2>/dev/null
+
+echo "▶ Generating ta.key..."
+openvpn --genkey secret ta.key
+
+echo "▶ Copying files to /etc/openvpn..."
 sudo mkdir -p /etc/openvpn/server
 sudo mkdir -p /etc/openvpn/client
-sudo rm -rf /etc/openvpn/easy-rsa
-sudo mkdir -p /etc/openvpn/easy-rsa
-
-echo "▶ Copying easy-rsa..."
-sudo cp -r /usr/share/easy-rsa/* /etc/openvpn/easy-rsa/
-cd /etc/openvpn/easy-rsa
-
-echo "▶ Building PKI..."
-sudo ./easyrsa init-pki > /dev/null
-sudo ./easyrsa --batch build-ca nopass > /dev/null
-sudo ./easyrsa --batch gen-req server nopass > /dev/null
-sudo ./easyrsa --batch sign-req server server > /dev/null
-sudo ./easyrsa --batch gen-req client1 nopass > /dev/null
-sudo ./easyrsa --batch sign-req client client1 > /dev/null
-
-echo "▶ Generating ta.key and dh.pem..."
-sudo openvpn --genkey secret /etc/openvpn/server/ta.key
-sudo openssl dhparam -out /etc/openvpn/server/dh.pem 2048
-
-echo "▶ Copying server certs..."
-sudo cp pki/ca.crt /etc/openvpn/server/
-sudo cp pki/issued/server.crt /etc/openvpn/server/
-sudo cp pki/private/server.key /etc/openvpn/server/
+sudo cp ca.crt server.crt server.key ta.key /etc/openvpn/server/
+sudo cp ca.crt client1.crt client1.key ta.key /etc/openvpn/client/
 
 echo "▶ Writing server.conf..."
 sudo tee /etc/openvpn/server/server.conf > /dev/null <<'EOF'
@@ -40,7 +46,7 @@ dev tun
 ca ca.crt
 cert server.crt
 key server.key
-dh dh.pem
+dh none
 tls-auth ta.key 0
 server 10.8.0.0 255.255.255.0
 ifconfig-pool-persist ipp.txt
@@ -69,13 +75,13 @@ echo "   Outgoing interface: $OUT_IFACE"
 sudo iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$OUT_IFACE" -j MASQUERADE
 
 echo "▶ Starting OpenVPN server..."
-sudo openvpn --config /etc/openvpn/server/server.conf --daemon
-sleep 3
+sudo openvpn --config /etc/openvpn/server/server.conf --daemon --log /tmp/openvpn-server.log
+sleep 5
 
 if pgrep -x openvpn > /dev/null; then
   echo "✅ OpenVPN is running on port 443 (TCP)"
 else
   echo "❌ OpenVPN failed to start"
-  sudo tail -50 /var/log/syslog | grep -i openvpn || true
+  sudo cat /tmp/openvpn-server.log || true
   exit 1
 fi
