@@ -4,7 +4,7 @@ set -e
 echo "▶ Cleaning up..."
 sudo rm -rf /tmp/openvpn-build 2>/dev/null || true
 sudo rm -f /tmp/chisel* 2>/dev/null || true
-sudo rm -f /tmp/cloudflared* 2>/dev/null || true
+sudo rm -f /tmp/tunnel*.log 2>/dev/null || true
 
 echo "═══════════════════════════════════════"
 echo "▶ Step 1: Downloading chisel..."
@@ -14,7 +14,6 @@ CHISEL_URL="https://github.com/jpillora/chisel/releases/download/v1.9.1/chisel_1
 
 download_ok=0
 for attempt in 1 2 3; do
-  echo "  Attempt $attempt..."
   if wget --timeout=30 --tries=2 -q "$CHISEL_URL" -O /tmp/chisel.gz; then
     download_ok=1
     break
@@ -61,52 +60,63 @@ echo "✅ Chisel server running"
 
 echo ""
 echo "═══════════════════════════════════════"
-echo "▶ Step 3: Installing cloudflared"
+echo "▶ Step 3: Creating SSH key"
 echo "═══════════════════════════════════════"
 
-wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared
-chmod +x /tmp/cloudflared
-sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+ssh-keygen -t rsa -b 2048 -f ~/.ssh/id_rsa -N "" -q
+chmod 600 ~/.ssh/id_rsa
 
-echo "  cloudflared version:"
-cloudflared --version
+ssh-keyscan -t rsa localhost.run >> ~/.ssh/known_hosts 2>/dev/null || true
+
+echo "  SSH key created"
 
 echo ""
 echo "═══════════════════════════════════════"
-echo "▶ Step 4: Starting cloudflared tunnel"
+echo "▶ Step 4: Starting localhost.run tunnel"
 echo "═══════════════════════════════════════"
 
-nohup cloudflared tunnel --url http://localhost:8080 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+nohup ssh -o StrictHostKeyChecking=no \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -R 80:localhost:8080 \
+  nokey@localhost.run \
+  > /tmp/tunnel.log 2>&1 &
 
-TUNNEL_HOST=""
-for i in {1..90}; do
-  if grep -q "trycloudflare.com" /tmp/cloudflared.log 2>/dev/null; then
-    TUNNEL_HOST=$(grep -o '[a-zA-Z0-9.-]*\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
+TUNNEL_URL=""
+for i in {1..45}; do
+  if grep -qE "https://[a-zA-Z0-9.-]+\.lhr\.life" /tmp/tunnel.log 2>/dev/null; then
+    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.lhr\.life' /tmp/tunnel.log | head -1)
     break
   fi
-  if ! pgrep -f "cloudflared tunnel" > /dev/null; then
-    echo "❌ Cloudflared process died"
-    echo "--- cloudflared.log ---"
-    cat /tmp/cloudflared.log
+  if ! pgrep -f "ssh.*localhost.run" > /dev/null; then
+    echo "❌ SSH tunnel process died"
+    echo "--- tunnel.log ---"
+    cat /tmp/tunnel.log
     exit 1
   fi
-  if [ $((i % 15)) -eq 0 ]; then
-    echo "  waited $((i*2))s... last log line:"
-    tail -1 /tmp/cloudflared.log
+  if [ $((i % 10)) -eq 0 ]; then
+    echo "  waited $((i*2))s..."
+    tail -3 /tmp/tunnel.log
   fi
   sleep 2
 done
 
-if [ -z "$TUNNEL_HOST" ]; then
-  echo "❌ Failed to get tunnel URL after 180s"
-  echo "--- cloudflared.log ---"
-  cat /tmp/cloudflared.log
+if [ -z "$TUNNEL_URL" ]; then
+  echo "❌ Failed to get tunnel URL after 90s"
+  echo "--- tunnel.log ---"
+  cat /tmp/tunnel.log
   exit 1
 fi
 
+TUNNEL_HOST=$(echo "$TUNNEL_URL" | sed 's|https://||')
 echo "$TUNNEL_HOST" > /tmp/tunnel_host.txt
+
 echo ""
 echo "═══════════════════════════════════════"
 echo "✅ ALL DONE"
+echo "   Tunnel URL : $TUNNEL_URL"
 echo "   Tunnel host: $TUNNEL_HOST"
 echo "═══════════════════════════════════════"
