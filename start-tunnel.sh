@@ -1,97 +1,100 @@
 #!/bin/bash
 set -e
 
-CHISEL_VERSION="v1.9.1"
-CHISEL_URL="https://github.com/jpillora/chisel/releases/download/${CHISEL_VERSION}/chisel_1.9.1_linux_amd64.gz"
+echo "▶ Installing dependencies..."
+sudo apt-get update -qq
+sudo apt-get install -y -qq openvpn openssl curl wget
 
-echo "▶ Downloading chisel ${CHISEL_VERSION}..."
-download_ok=0
-for attempt in 1 2 3; do
-  echo "  Attempt $attempt..."
-  if wget --timeout=30 --tries=2 -q "$CHISEL_URL" -O /tmp/chisel.gz; then
-    download_ok=1
-    break
-  fi
-  sleep 3
-done
+WORK=/tmp/openvpn-build
+rm -rf "$WORK"
+mkdir -p "$WORK"
+cd "$WORK"
 
-if [ "$download_ok" -ne 1 ]; then
-  echo "❌ Failed to download chisel after 3 attempts"
-  exit 1
-fi
+echo "▶ Generating CA..."
+openssl genrsa -out ca.key 2048 2>/dev/null
+openssl req -new -x509 -days 3650 -key ca.key -out ca.crt \
+  -subj "/C=US/ST=CA/L=LA/O=OpenVPN/CN=OpenVPN-CA" 2>/dev/null
 
-gunzip -f /tmp/chisel.gz
-mv /tmp/chisel /tmp/chisel-bin
-chmod +x /tmp/chisel-bin
+echo "▶ Generating server cert..."
+openssl genrsa -out server.key 2048 2>/dev/null
+openssl req -new -key server.key -out server.csr \
+  -subj "/C=US/ST=CA/L=LA/O=OpenVPN/CN=server" 2>/dev/null
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out server.crt -days 3650 2>/dev/null
 
-echo "▶ Chisel version:"
-/tmp/chisel-bin --version || true
+echo "▶ Generating client cert..."
+openssl genrsa -out client1.key 2048 2>/dev/null
+openssl req -new -key client1.key -out client1.csr \
+  -subj "/C=US/ST=CA/L=LA/O=OpenVPN/CN=client1" 2>/dev/null
+openssl x509 -req -in client1.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out client1.crt -days 3650 2>/dev/null
 
-echo "▶ Starting chisel server on port 8080..."
-# chisel server را روی پورت محلی 8080 راه‌اندازی می‌کنیم
-# cloudflared ترافیک WebSocket را به این پورت می‌فرستد
-# و chisel آن را به OpenVPN (localhost:443) فوروارد می‌کند
-nohup /tmp/chisel-bin server --port 8080 --socks5 443 --proxy http://localhost:8080 > /tmp/chisel.log 2>&1 &
+echo "▶ Generating ta.key..."
+openvpn --genkey secret ta.key
 
-sleep 3
-if ! pgrep -f "chisel-bin server" > /dev/null; then
-  echo "❌ Chisel server failed to start"
-  cat /tmp/chisel.log
-  exit 1
-fi
-echo "✅ Chisel server is running on port 8080"
+echo "▶ Copying files to /etc/openvpn..."
+sudo mkdir -p /etc/openvpn/server
+sudo mkdir -p /etc/openvpn/client
+sudo cp ca.crt server.crt server.key ta.key /etc/openvpn/server/
+sudo cp ca.crt client1.crt client1.key ta.key /etc/openvpn/client/
 
-echo "▶ Downloading cloudflared..."
-CF_VERSION="2024.10.0"
-CF_URL="https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-linux-amd64"
+echo "▶ Writing server.conf..."
+sudo tee /etc/openvpn/server/server.conf > /dev/null <<'EOF'
+port 443
+proto tcp-server
+dev tun
+ca ca.crt
+cert server.crt
+key server.key
+dh none
+tls-auth ta.key 0
+server 10.8.0.0 255.255.255.0
+ifconfig-pool-persist ipp.txt
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 1.1.1.1"
+push "dhcp-option DNS 8.8.8.8"
+keepalive 10 120
+cipher AES-256-CBC
+auth SHA256
+user nobody
+group nogroup
+persist-key
+persist-tun
+status openvpn-status.log
+verb 3
+EOF
 
-download_ok=0
-for attempt in 1 2 3; do
-  if wget --timeout=30 --tries=2 -q "$CF_URL" -O /tmp/cloudflared; then
-    download_ok=1
-    break
-  fi
-  if curl -fsSL --max-time 60 "$CF_URL" -o /tmp/cloudflared; then
-    download_ok=1
-    break
-  fi
-  sleep 3
-done
+echo "▶ Enabling IP forwarding..."
+sudo sysctl -w net.ipv4.ip_forward=1 > /dev/null
 
-if [ "$download_ok" -ne 1 ]; then
-  echo "❌ Failed to download cloudflared"
-  exit 1
-fi
+echo "▶ Setting up NAT..."
+OUT_IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+echo "   Outgoing interface: $OUT_IFACE"
+sudo iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$OUT_IFACE" -j MASQUERADE
 
-if ! file /tmp/cloudflared | grep -q "ELF 64-bit"; then
-  echo "❌ Downloaded cloudflared is not a valid ELF binary"
-  exit 1
-fi
+echo "▶ Starting OpenVPN server..."
+sudo openvpn --config /etc/openvpn/server/server.conf --daemon --log /tmp/openvpn-server.log || true
 
-chmod +x /tmp/cloudflared
-
-echo "▶ Starting cloudflared tunnel to chisel (http://localhost:8080)..."
-nohup /tmp/cloudflared tunnel --url http://localhost:8080 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
-
-TUNNEL_HOST=""
-for i in {1..45}; do
-  if grep -q "trycloudflare.com" /tmp/cloudflared.log 2>/dev/null; then
-    TUNNEL_HOST=$(grep -o '[a-zA-Z0-9.-]*\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
-    break
-  fi
-  if ! pgrep -f "cloudflared tunnel" > /dev/null; then
-    echo "❌ Cloudflared process died"
-    cat /tmp/cloudflared.log
-    exit 1
-  fi
+echo "▶ Waiting for OpenVPN to come up..."
+OPENVPN_UP=0
+for i in {1..15}; do
   sleep 2
+  if pgrep -f "openvpn" > /dev/null; then
+    OPENVPN_UP=1
+    break
+  fi
+  echo "  attempt $i: not up yet..."
 done
 
-if [ -z "$TUNNEL_HOST" ]; then
-  echo "❌ Failed to get tunnel URL"
-  cat /tmp/cloudflared.log
+echo "--- OpenVPN processes ---"
+pgrep -a openvpn || echo "(none)"
+echo "--- Last 20 lines of OpenVPN log ---"
+sudo tail -20 /tmp/openvpn-server.log 2>/dev/null || echo "(no log)"
+
+if [ "$OPENVPN_UP" -eq 1 ]; then
+  echo "✅ OpenVPN is running on port 443 (TCP)"
+  exit 0
+else
+  echo "❌ OpenVPN failed to start"
   exit 1
 fi
-
-echo "$TUNNEL_HOST" > /tmp/tunnel_host.txt
-echo "✅ Chisel tunnel ready: $TUNNEL_HOST"
