@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-echo "▶ Cleaning up previous build directory..."
+echo "▶ Cleaning up..."
 sudo rm -rf /tmp/openvpn-build 2>/dev/null || true
-sudo rm -rf /tmp/chisel* 2>/dev/null || true
-sudo rm -rf /tmp/cloudflared* 2>/dev/null || true
+sudo rm -f /tmp/chisel* 2>/dev/null || true
+sudo rm -f /tmp/cloudflared* 2>/dev/null || true
 
 echo "═══════════════════════════════════════"
 echo "▶ Step 1: Downloading chisel..."
@@ -61,44 +61,22 @@ echo "✅ Chisel server running"
 
 echo ""
 echo "═══════════════════════════════════════"
-echo "▶ Step 3: Downloading cloudflared"
+echo "▶ Step 3: Installing cloudflared"
 echo "═══════════════════════════════════════"
 
-CF_VERSION="2024.10.0"
-CF_URL="https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-linux-amd64"
-
-download_ok=0
-for attempt in 1 2 3; do
-  echo "  Attempt $attempt..."
-  if wget --timeout=30 --tries=2 -q "$CF_URL" -O /tmp/cloudflared; then
-    download_ok=1
-    break
-  fi
-  if curl -fsSL --max-time 60 "$CF_URL" -o /tmp/cloudflared; then
-    download_ok=1
-    break
-  fi
-  sleep 3
-done
-
-if [ "$download_ok" -ne 1 ]; then
-  echo "❌ Failed to download cloudflared"
-  exit 1
-fi
-
-if ! file /tmp/cloudflared | grep -q "ELF 64-bit"; then
-  echo "❌ cloudflared is not a valid ELF binary"
-  exit 1
-fi
-
+wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared
 chmod +x /tmp/cloudflared
+sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
+
+echo "  cloudflared version:"
+cloudflared --version
 
 echo ""
 echo "═══════════════════════════════════════"
-echo "▶ Step 4: Starting cloudflared tunnel (http2 protocol)"
+echo "▶ Step 4: Starting cloudflared tunnel"
 echo "═══════════════════════════════════════"
 
-nohup /tmp/cloudflared tunnel --url http://localhost:8080 --protocol http2 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+nohup cloudflared tunnel --url http://localhost:8080 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
 
 TUNNEL_HOST=""
 for i in {1..90}; do
