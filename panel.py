@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import http.server
 import socketserver
@@ -6,19 +7,18 @@ import os
 PORT = 8080
 TUNNEL_HOST_FILE = "/tmp/tunnel_host.txt"
 OVPN_OUTPUT = "/tmp/client.ovpn"
-EASY_RSA = "/etc/openvpn/easy-rsa/pki"
 
 def build_ovpn():
     with open(TUNNEL_HOST_FILE) as f:
         host = f.read().strip()
 
-    with open(f"{EASY_RSA}/ca.crt") as f:
+    with open("/etc/openvpn/client/ca.crt") as f:
         ca = f.read()
-    with open(f"{EASY_RSA}/issued/client1.crt") as f:
+    with open("/etc/openvpn/client/client1.crt") as f:
         cert = f.read()
-    with open(f"{EASY_RSA}/private/client1.key") as f:
+    with open("/etc/openvpn/client/client1.key") as f:
         key = f.read()
-    with open("/etc/openvpn/server/ta.key") as f:
+    with open("/etc/openvpn/client/ta.key") as f:
         ta = f.read()
 
     config = f"""client
